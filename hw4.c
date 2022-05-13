@@ -24,7 +24,29 @@ typedef struct consumer_properties{
     int loop_count;
 }ConsumerProperties;
 
+typedef struct supplier_properties{
+    char *input_filename;
+    int consumer_count;
+    int loop_count;
+}SupplierProperties;
+
+union semun {
+    int              val;    /* Value for SETVAL */
+    struct semid_ds *buf;    /* Buffer for IPC_STAT, IPC_SET */
+    unsigned short  *array;  /* Array for GETALL, SETALL */
+    struct seminfo  *__buf;  /* Buffer for IPC_INFO
+                                (Linux-specific) */
+};
+
+
 int semaphores;
+sig_atomic_t sigint_interrupt = 0;
+
+void sigint_handler(int signum){
+    if(signum == SIGINT){
+        sigint_interrupt = 1;
+    }
+}
 
 int main(int argc, char *argv[]){   
     int consumer_count;
@@ -35,6 +57,14 @@ int main(int argc, char *argv[]){
     pthread_t *consumer_thread;
 
     ConsumerProperties **consumer_properties;
+    SupplierProperties *supplier_properties;
+
+    union semun sem_arg;
+
+    struct sigaction act;
+    memset(&act, 0, sizeof(act));
+    act.sa_handler = sigint_handler;
+    sigaction(SIGINT, &act, NULL);
 
     input_filename = (char *)malloc(sizeof(char)*100);
 
@@ -57,15 +87,20 @@ int main(int argc, char *argv[]){
         exit(EXIT_FAILURE);
     }
 
-    key_t key = ftok("/tmp", 1);
-
     semaphores = semget(IPC_PRIVATE, 2, IPC_CREAT|IPC_EXCL|0600);
     if(semaphores == -1){
         perror("semget: ");
         exit(EXIT_FAILURE);
     }
 
-    if(semctl(semaphores, 0, SETVAL, 0) == -1){
+    sem_arg.val = 0;
+
+    if(semctl(semaphores, 0, SETVAL, sem_arg) == -1){
+        perror("semctl: ");
+        exit(EXIT_FAILURE);
+    }
+
+    if(semctl(semaphores, 1, SETVAL, sem_arg) == -1){
         perror("semctl: ");
         exit(EXIT_FAILURE);
     }
@@ -85,7 +120,11 @@ int main(int argc, char *argv[]){
         }
     }
 
-    if(pthread_create(&supplier_thread, NULL, supplier, (void*)input_filename) != 0){
+    supplier_properties = (SupplierProperties*)malloc(sizeof(SupplierProperties));
+    supplier_properties->input_filename = input_filename;
+    supplier_properties->consumer_count = consumer_count;
+    supplier_properties->loop_count = loop_count;
+    if(pthread_create(&supplier_thread, NULL, supplier, (void*)supplier_properties) != 0){
         perror("pthread_create: ");
         exit(EXIT_FAILURE);
     }
@@ -140,17 +179,21 @@ int check_arguments(int argc, char *argv[], int *consumer_count, int* loop_count
 }
 
 void *supplier(void *arg){
-    char *input_filename = (char*)arg;
     int fd;
     int read_bytes = 1;
     char c;
     int sem1_count;
     int sem2_count;
     char timestamp_buf[26];
+    int input_count = 0;
 
     struct sembuf ops[2] = {{0, 1, 0}, {1, 1, 0}};
 
-    fd = open(input_filename, O_RDONLY);
+    union semun sem_arg;
+
+    SupplierProperties *supplier_properties = (SupplierProperties*)arg;
+
+    fd = open(supplier_properties->input_filename, O_RDONLY);
     if(fd < 0){
         perror("open: ");
         pthread_exit(NULL);
@@ -158,7 +201,11 @@ void *supplier(void *arg){
 
     while(read_bytes > 0){
         NO_EINTR(read_bytes = read(fd, &c, 1));
+        if(sigint_interrupt == 1){
+            break;
+        }
         if(read_bytes > 0){
+            input_count+=1;
             if((sem1_count = semctl(semaphores, 0, GETVAL)) < 0){
             perror("semctl: ");
             pthread_exit(NULL);
@@ -186,6 +233,24 @@ void *supplier(void *arg){
             get_timestamp(timestamp_buf);
             printf("%s Supplier: delivered a ‘%c’. Post-delivery amounts: %d x ‘1’, %d x ‘2’.\n", timestamp_buf, c, sem1_count, sem2_count);
         }
+    }
+
+    if(input_count < supplier_properties->consumer_count * supplier_properties->loop_count * 2){
+        fprintf(stderr, "Not enough input data\n");
+        raise(SIGINT);
+    }
+
+    if(sigint_interrupt){
+        sem_arg.array = (unsigned short*)malloc(sizeof(unsigned short) * 2);
+        sem_arg.array[0] = supplier_properties->consumer_count;
+        sem_arg.array[1] = supplier_properties->consumer_count;
+
+        if(semctl(semaphores, 0, SETALL, sem_arg) == -1){
+            perror("semctl: ");
+            exit(EXIT_FAILURE);
+        }
+
+        free(sem_arg.array);
     }
 
     close(fd);
@@ -223,6 +288,10 @@ void *consumer(void *arg){
         if(semop(semaphores, ops, 2) == -1){
             perror("semop: ");
             exit(EXIT_FAILURE);
+        }
+        
+        if(sigint_interrupt){
+            break;
         }
 
         if((sem1_count = semctl(semaphores, 0, GETVAL)) < 0){
