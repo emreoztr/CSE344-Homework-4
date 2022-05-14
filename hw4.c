@@ -31,11 +31,10 @@ typedef struct supplier_properties{
 }SupplierProperties;
 
 union semun {
-    int              val;    /* Value for SETVAL */
-    struct semid_ds *buf;    /* Buffer for IPC_STAT, IPC_SET */
-    unsigned short  *array;  /* Array for GETALL, SETALL */
-    struct seminfo  *__buf;  /* Buffer for IPC_INFO
-                                (Linux-specific) */
+    int val;
+    struct semid_ds *buf;
+    unsigned short  *array;
+    struct seminfo  *__buf;
 };
 
 
@@ -71,7 +70,7 @@ int main(int argc, char *argv[]){
     setvbuf(stdout, NULL, _IONBF, 0);
 
     if(check_arguments(argc, argv, &consumer_count, &loop_count, input_filename) == -1){
-        fprintf(stderr, "Usage: ./hw4 -C 10 -N 5 -F inputfilePath\n");
+        fprintf(stderr, "C should be bigger than 4 and N should be bigger than 1, Usage: ./hw4 -C 10 -N 5 -F inputfilePath\n");
         exit(EXIT_SUCCESS);
     }
 
@@ -141,6 +140,7 @@ int main(int argc, char *argv[]){
         free(consumer_properties[i]);
     }
     free(consumer_properties);
+    free(supplier_properties);
 
     if(semctl(semaphores, 0, IPC_RMID) < 0){
         perror("semctl2: ");
@@ -160,7 +160,7 @@ int check_arguments(int argc, char *argv[], int *consumer_count, int* loop_count
         return -1;
     }
 
-    for(int i = 0; i < argc; ++i){
+    for(int i = 0; i < argc - 1; ++i){
         if(strcmp(argv[i], "-C") == 0){
             *consumer_count = atoi(argv[i+1]);
         }
@@ -172,7 +172,7 @@ int check_arguments(int argc, char *argv[], int *consumer_count, int* loop_count
         }
     }
 
-    if(*consumer_count == -1 || *loop_count == -1 || *input_filename == NULL){
+    if(*consumer_count <= 4 || *loop_count <= 1){
         return -1;
     }
     return 0;
@@ -186,6 +186,7 @@ void *supplier(void *arg){
     int sem2_count;
     char timestamp_buf[26];
     int input_count = 0;
+    int return_val;
 
     struct sembuf ops[2] = {{0, 1, 0}, {1, 1, 0}};
 
@@ -193,7 +194,7 @@ void *supplier(void *arg){
 
     SupplierProperties *supplier_properties = (SupplierProperties*)arg;
 
-    fd = open(supplier_properties->input_filename, O_RDONLY);
+    NO_EINTR(fd = open(supplier_properties->input_filename, O_RDONLY));
     if(fd < 0){
         perror("open: ");
         pthread_exit(NULL);
@@ -208,26 +209,30 @@ void *supplier(void *arg){
             input_count+=1;
             if((sem1_count = semctl(semaphores, 0, GETVAL)) < 0){
             perror("semctl: ");
-            pthread_exit(NULL);
+            break;
             }
             if((sem2_count = semctl(semaphores, 1, GETVAL)) < 0){
                 perror("semctl: ");
-                pthread_exit(NULL);
+                break;
             }
 
             if(c != '1' && c != '2'){
                 fprintf(stderr, "Invalid input file\n");
-                exit(EXIT_SUCCESS);
             }
             
             get_timestamp(timestamp_buf);
             printf("%s Supplier: read from input a '%c'. Current amounts: %d x ‘1’, %d x ‘2’.\n", timestamp_buf, c, sem1_count, sem2_count);
             
             if(c == '1'){
-                semop(semaphores, &ops[0], 1);
+                NO_EINTR(return_val = semop(semaphores, &ops[0], 1));
             }
             else if(c == '2'){
-                semop(semaphores, &ops[1], 1);
+                NO_EINTR(return_val = semop(semaphores, &ops[1], 1));
+            }
+
+            if(return_val == -1){
+                perror("semop: ");
+                break;
             }
 
             get_timestamp(timestamp_buf);
@@ -266,6 +271,7 @@ void *consumer(void *arg){
     ConsumerProperties *consumer_properties = (ConsumerProperties*)arg;
     int sem1_count;
     int sem2_count;
+    int return_val;
     struct sembuf ops[2] = {
         {0, -1, 0},
         {1, -1, 0}
@@ -275,19 +281,20 @@ void *consumer(void *arg){
     for(int i = 0; i < consumer_properties->loop_count; ++i){
         if((sem1_count = semctl(semaphores, 0, GETVAL)) < 0){
             perror("semctl: ");
-            exit(EXIT_FAILURE);
+            break;
         }
         if((sem2_count = semctl(semaphores, 1, GETVAL)) < 0){
             perror("semctl: ");
-            exit(EXIT_FAILURE);
+            break;
         }
 
         get_timestamp(timestamp_buf);
         printf("%s Consumer-%d at iteration %d (waiting). Current amounts: %d x ‘1’, %d x ‘2’.\n", timestamp_buf, consumer_properties->consumer_id, i, sem1_count, sem2_count);
 
-        if(semop(semaphores, ops, 2) == -1){
+        NO_EINTR(return_val = semop(semaphores, ops, 2));
+        if(return_val < 0){
             perror("semop: ");
-            exit(EXIT_FAILURE);
+            break;
         }
         
         if(sigint_interrupt){
@@ -296,11 +303,11 @@ void *consumer(void *arg){
 
         if((sem1_count = semctl(semaphores, 0, GETVAL)) < 0){
             perror("semctl: ");
-            exit(EXIT_FAILURE);
+            break;
         }
         if((sem2_count = semctl(semaphores, 1, GETVAL)) < 0){
             perror("semctl: ");
-            exit(EXIT_FAILURE);
+            break;
         }
 
         get_timestamp(timestamp_buf);

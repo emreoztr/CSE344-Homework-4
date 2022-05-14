@@ -1,5 +1,8 @@
 {
     "files.associations": {
-        "types.h": "c"
+        "types.h": "c",
+        "ipc.h": "c",
+        "sem.h": "c",
+        "signal.h": "c"
     }
 }
